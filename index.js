@@ -1,5 +1,6 @@
 const ORIGIN_HOSTNAME = 'main--ben-helix-test--ben-zahler.hlx.live';
-const IO_HOSTNAME = '14257-partnerportaltest-adapttodemo.adobeioruntime.net';
+const API_HOSTNAME = '14257-partnerportaltest-adapttodemo.adobeioruntime.net';
+const IO_HOSTNAME = '14257-partnerportaltest-adapttodemo.dev.runtime.adobe.io';
 const IO_API_PATH_PREFIX = '/api/v1';
 const SIGN_IN_RESOURCES_PREFIX = '/index';
 const FORBIDDEN_PAGE = 'https://main--ben-helix-test--ben-zahler.hlx.live/forbidden';
@@ -53,9 +54,16 @@ async function redirectToForbidden(request) {
 
 async function fetchFromOrigin(request) {
 	const url = new URL(request.url);
-	url.hostname = (url.pathname.startsWith(IO_API_PATH_PREFIX) || url.pathname.startsWith(SIGN_IN_RESOURCES_PREFIX))
-		? IO_HOSTNAME
-		: ORIGIN_HOSTNAME;
+	switch (true){
+		case url.pathname.startsWith(IO_API_PATH_PREFIX):
+			url.hostname = API_HOSTNAME;
+			break;
+		case url.pathname.startsWith(SIGN_IN_RESOURCES_PREFIX):
+			url.hostname = IO_HOSTNAME;
+			break;
+		default:
+			url.hostname = ORIGIN_HOSTNAME;
+	}
 
 	console.log(`${url.pathname} with new host ${url.hostname}`);
 	const req = new Request(url, request);
