@@ -1,5 +1,5 @@
 const ORIGIN_HOSTNAME = 'main--ben-helix-test--ben-zahler.hlx.live';
-const IO_HOSTNAME = '14257-partnerportaltest-bensplayspace.dev.runtime.adobe.io';
+const IO_HOSTNAME = '14257-partnerportaltest-adapttodemo.adobeioruntime.net';
 const IO_API_PATH_PREFIX = '/api/v1';
 const SIGN_IN_RESOURCES_PREFIX = '/index';
 const FORBIDDEN_PAGE = 'https://main--ben-helix-test--ben-zahler.hlx.live/forbidden';
@@ -31,7 +31,7 @@ function createUncachedResponse(response) {
 
 async function redirectToLogin(request) {
 	console.log(`requesting login page`);
-	const loginReq = new Request(new URL(`https://14257-partnerportaltest-bensplayspace.dev.runtime.adobe.io/index.html`), request);
+	const loginReq = new Request(new URL(`https://14257-partnerportaltest-adapttodemo.dev.runtime.adobe.io/index.html`), request);
 	const loginOpts = {cf: {}};
 	loginReq.headers.set('x-forwarded-host', loginReq.headers.get('host'));
 	loginReq.headers.set('x-byo-cdn-type', 'cloudflare');
@@ -97,7 +97,7 @@ export default {
 					return await redirectToLogin(request);
 				}
 				// user already signed in, we need to verify his access
-				const verifyUserResponse = await fetch("https://14257-partnerportaltest-bensplayspace.dev.runtime.adobe.io/api/v1/web/RatkoDev/verifyUser", {
+				const verifyUserResponse = await fetch("https://14257-partnerportaltest-adapttodemo.adobeioruntime.net/api/v1/web/AdapttoService/verifyUser", {
 					method: "POST",
 					body: JSON.stringify({
 						verification: adaptToVerification,
