@@ -17,7 +17,7 @@ function getCookieValue(cookieString, cookieName) {
 	}
 }
 
-function createNewResponse(response, isCacheable, mustRevalidate, httpStatus, resetCookies) {
+function createNewResponse(response, isCacheable, mustRevalidate, resetCookies, httpStatus) {
 	const newHeaders = new Headers(response.headers);
 	if(!isCacheable) {
 		newHeaders.set('Cache-Control', 'no-store');
@@ -59,12 +59,12 @@ async function redirectToForbidden(request) {
 	forbiddenReq.headers.set('x-byo-cdn-type', 'cloudflare');
 	const forbiddenResp = await fetch(forbiddenReq, forbiddenOpts);
 	console.log(`retrieved forbidden page`);
-	return createNewResponse(forbiddenResp, true, true, 403);
+	return createNewResponse(forbiddenResp, true, true, false, 403);
 }
 
-async function fetchFromOrigin(request) {
+function getBackendUrl(request) {
 	const url = new URL(request.url);
-	switch (true){
+	switch (true) {
 		case url.pathname.startsWith(IO_API_PATH_PREFIX):
 			url.hostname = API_HOSTNAME;
 			break;
@@ -74,7 +74,10 @@ async function fetchFromOrigin(request) {
 		default:
 			url.hostname = ORIGIN_HOSTNAME;
 	}
+	return url;
+}
 
+async function fetchFromOrigin(request, url) {
 	console.log(`${url.pathname} with new host ${url.hostname}`);
 	const req = new Request(url, request);
 	const opts = {cf: {}};
@@ -85,15 +88,23 @@ async function fetchFromOrigin(request) {
 	return await fetch(req, opts);
 }
 
-function shouldValidate(protection, memberDataJson, memberData, url) {
-	const extension = url.substring(url.lastIndexOf('.'));
+function isProtectedResource(protection) {
+	return protection && protection !== 'public';
+}
+
+function shouldValidate(protection, memberDataJson, adaptToVerification, url) {
+	console.log(`should validate ${protection} ${memberDataJson} ${adaptToVerification} ${url}`);
+	const extension = url.pathname.substring(url.pathname.lastIndexOf('.'));
 	if(extension.indexOf('/') === -1) {
 		return false;
 	}
-	if(memberDataJson || memberData) {
+	if(!url.hostname.startsWith(ORIGIN_HOSTNAME)){
+		return false;
+	}
+	if(memberDataJson && adaptToVerification) {
 		return true;
 	}
-	return protection && protection !== 'public';
+	return isProtectedResource(protection);
 }
 
 function hasUserAccess(memberData, protection) {
@@ -107,11 +118,13 @@ export default {
 			let resetCookies = false;
 			let cache = caches.default;
 			const cacheKey = request.url;
-			let resp =  await cache.match(cacheKey);
+			let backendUrl = getBackendUrl(request);
+			console.log(`backendUrl is ${backendUrl?.hostname}`);
+			let resp =  backendUrl?.hostname === ORIGIN_HOSTNAME ?await cache.match(cacheKey): null;
 			console.log(`${request.url} retrieved from cache`, resp);
 			if (!resp) {
 				// response not retrieved from cache, so we need to invoke the origin
-				resp = await fetchFromOrigin(request);
+				resp = await fetchFromOrigin(request, backendUrl);
 				console.log(`${cacheKey} retrieved from from origin`, resp);
 				ctx.waitUntil(cache.put(cacheKey, resp.clone()));
 				console.log(`${cacheKey} added to cache`);
@@ -124,40 +137,48 @@ export default {
 			console.log(`response status ${resp.status}, protection: ${protection}`, new Date());
 			const memberDataJson = getCookieValue(request.headers.get('Cookie'), 'adaptToMemberData');
 			const adaptToVerification = getCookieValue(request.headers.get('Cookie'), 'adaptToVerification');
-			if (shouldValidate(protection, memberDataJson, adaptToVerification, request.url)) {
-				let memberData = {};
-				try{
-					memberData = JSON.parse(memberDataJson);
+
+			let memberData = {};
+			if(memberDataJson && adaptToVerification) {
+				memberData = JSON.parse(memberDataJson);
+			} else if (memberDataJson || adaptToVerification) {
+				resetCookies = true;
+			}
+
+
+			if (shouldValidate(protection, memberDataJson, adaptToVerification, backendUrl)) {
+				try {
+					console.log(`existing membership level is ${memberData.level} with verification ${adaptToVerification}`, new Date());
+					if (isProtectedResource(protection) && !memberData.level) {
+						// send the user to the login page
+						return await redirectToLogin(request);
+					}
+					// user already signed in, we need to verify his access
+					const verifyUserResponse = await fetch("https://14257-partnerportaltest-adapttodemo.adobeioruntime.net/api/v1/web/AdapttoService/verifyUser", {
+						method: "POST",
+						body: JSON.stringify({
+							verification: adaptToVerification,
+							userData: memberData,
+						}),
+						headers: {
+							"Content-type": "application/json; charset=UTF-8"
+						}
+					})
+					console.log(`verify user response status ${verifyUserResponse.status}`);
+					if (verifyUserResponse.status !== 200) {
+						memberData = {};
+						resetCookies = true;
+					}
 				} catch (e) {
 					console.log(`error parsing member data ${memberDataJson}`);
 					resetCookies = true;
 				}
-				console.log(`existing membership level is ${memberData.level} with verification ${adaptToVerification}`, new Date());
-				if (!memberData.level) {
-					// send the user to the login page
-					return await redirectToLogin(request);
-				}
-				// user already signed in, we need to verify his access
-				const verifyUserResponse = await fetch("https://14257-partnerportaltest-adapttodemo.adobeioruntime.net/api/v1/web/AdapttoService/verifyUser", {
-					method: "POST",
-					body: JSON.stringify({
-						verification: adaptToVerification,
-						userData: memberData,
-					}),
-					headers: {
-						"Content-type": "application/json; charset=UTF-8"
-					}
-				})
-				console.log(`verify user response status ${verifyUserResponse.status}`);
-				if (verifyUserResponse.status !== 200) {
-					memberData = {};
-					resetCookies = true;
-				}
-				if (!hasUserAccess(memberData, protection)) {
-					//the user does not have access to the requested resource
-					return await redirectToForbidden(request);
-				}
 				// all good: we can serve the response to the user
+			}
+
+			if (!hasUserAccess(memberData, protection)) {
+				//the user does not have access to the requested resource
+				return await redirectToForbidden(request);
 			}
 			console.log(`returning response with status ${resp.status}`);
 			// we can cache the response
