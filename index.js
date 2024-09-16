@@ -17,15 +17,25 @@ function getCookieValue(cookieString, cookieName) {
 	}
 }
 
-function createUncachedResponse(response) {
+function createNewResponse(response, isCacheable, mustRevalidate, httpStatus, resetCookies) {
 	const newHeaders = new Headers(response.headers);
-	newHeaders.set('Cache-Control', 'no-store');
-	newHeaders.set('Pragma', 'no-cache');
-	newHeaders.set('Expires', '0');
-	console.log(`retrieved login page`);
+	if(!isCacheable) {
+		newHeaders.set('Cache-Control', 'no-store');
+		newHeaders.set('Pragma', 'no-cache');
+		newHeaders.set('Expires', '0');
+	} else {
+		const cacheControl = mustRevalidate ? 'must-revalidate, private, max-age=0' : 'public, max-age=500';
+		newHeaders.set('Cache-Control', cacheControl);
+	}
+	if (resetCookies) {
+		console.log('resetting cookies');
+		newHeaders.append('Set-Cookie', `adaptToMemberData=; Secure; SameSite=Strict; Path=/; Max-Age=0;`);
+		newHeaders.append('Set-Cookie', `adaptToVerification=; Secure; HttpOnly; SameSite=Strict; Path=/; Max-Age=0;`);
+	}
+	console.log('created new response with headers', newHeaders.get('Cache-Control'));
 	return new Response(response.body, {
 		headers: newHeaders,
-		status: response.status,
+		status: httpStatus || response.status,
 		statusText: response.statusText,
 	});
 }
@@ -38,7 +48,7 @@ async function redirectToLogin(request) {
 	loginReq.headers.set('x-byo-cdn-type', 'cloudflare');
 	const loginResp = (await fetch(loginReq, loginOpts)).clone();
 	console.log(`retrieved login page`);
-	return createUncachedResponse(loginResp);
+	return createNewResponse(loginResp, false, false);
 }
 
 async function redirectToForbidden(request) {
@@ -49,7 +59,7 @@ async function redirectToForbidden(request) {
 	forbiddenReq.headers.set('x-byo-cdn-type', 'cloudflare');
 	const forbiddenResp = await fetch(forbiddenReq, forbiddenOpts);
 	console.log(`retrieved forbidden page`);
-	return createUncachedResponse(forbiddenResp);
+	return createNewResponse(forbiddenResp, true, true, 403);
 }
 
 async function fetchFromOrigin(request) {
@@ -75,13 +85,29 @@ async function fetchFromOrigin(request) {
 	return await fetch(req, opts);
 }
 
+function shouldValidate(protection, memberDataJson, memberData, url) {
+	const extension = url.substring(url.lastIndexOf('.'));
+	if(extension.indexOf('/') === -1) {
+		return false;
+	}
+	if(memberDataJson || memberData) {
+		return true;
+	}
+	return protection && protection !== 'public';
+}
+
+function hasUserAccess(memberData, protection) {
+	return memberData.level === 'secret' || protection === memberData.level || !protection || protection === 'public';
+}
+
 export default {
 	async fetch(request, env, ctx) {
 		try {
 			console.log(`${request.url} start`);
+			let resetCookies = false;
 			let cache = caches.default;
 			const cacheKey = request.url;
-			let resp = request.url.includes('bypass') ? undefined : await cache.match(cacheKey);
+			let resp =  await cache.match(cacheKey);
 			console.log(`${request.url} retrieved from cache`, resp);
 			if (!resp) {
 				// response not retrieved from cache, so we need to invoke the origin
@@ -96,11 +122,18 @@ export default {
 
 			const protection = resp.headers.get("protection");
 			console.log(`response status ${resp.status}, protection: ${protection}`, new Date());
-			if (protection && protection !== 'public') {
-				let memberLevel = getCookieValue(request.headers.get('Cookie'), 'adaptToMembershipLevel');
-				const adaptToVerification = getCookieValue(request.headers.get('Cookie'), 'adaptToVerification');
-				console.log(`existing membership level is ${memberLevel} with verification ${adaptToVerification}`, new Date());
-				if (!memberLevel) {
+			const memberDataJson = getCookieValue(request.headers.get('Cookie'), 'adaptToMemberData');
+			const adaptToVerification = getCookieValue(request.headers.get('Cookie'), 'adaptToVerification');
+			if (shouldValidate(protection, memberDataJson, adaptToVerification, request.url)) {
+				let memberData = {};
+				try{
+					memberData = JSON.parse(memberDataJson);
+				} catch (e) {
+					console.log(`error parsing member data ${memberDataJson}`);
+					resetCookies = true;
+				}
+				console.log(`existing membership level is ${memberData.level} with verification ${adaptToVerification}`, new Date());
+				if (!memberData.level) {
 					// send the user to the login page
 					return await redirectToLogin(request);
 				}
@@ -109,7 +142,7 @@ export default {
 					method: "POST",
 					body: JSON.stringify({
 						verification: adaptToVerification,
-						userData: memberLevel,
+						userData: memberData,
 					}),
 					headers: {
 						"Content-type": "application/json; charset=UTF-8"
@@ -117,15 +150,18 @@ export default {
 				})
 				console.log(`verify user response status ${verifyUserResponse.status}`);
 				if (verifyUserResponse.status !== 200) {
-					memberLevel = '';
+					memberData = {};
+					resetCookies = true;
 				}
-				if (memberLevel !== 'secret' && protection !== memberLevel) {
+				if (!hasUserAccess(memberData, protection)) {
+					//the user does not have access to the requested resource
 					return await redirectToForbidden(request);
 				}
-				// all good: we can server the response from backend
-				resp = createUncachedResponse(resp);
+				// all good: we can serve the response to the user
 			}
 			console.log(`returning response with status ${resp.status}`);
+			// we can cache the response
+			resp = createNewResponse(resp, true, true, resetCookies);
 			return resp;
 		} catch (e) {
 			return new Response(e.stack, {status: 500})
