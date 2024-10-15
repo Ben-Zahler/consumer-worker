@@ -1,9 +1,9 @@
-const ORIGIN_HOSTNAME = 'main--ben-helix-test--ben-zahler.hlx.live';
+const ORIGIN_HOSTNAME = 'main--adaptto--zagi25.aem.live';
 const API_HOSTNAME = '14257-partnerportaltest-adapttodemo.adobeioruntime.net';
-const IO_HOSTNAME = '14257-partnerportaltest-adapttodemo.dev.runtime.adobe.io';
+const IO_HOSTNAME = '14257-partnerportaltest-adapttodemo.adobeio-static.net';
 const IO_API_PATH_PREFIX = '/api/v1';
 const SIGN_IN_RESOURCES_PREFIX = '/index';
-const FORBIDDEN_PAGE = 'https://main--ben-helix-test--ben-zahler.hlx.live/forbidden';
+const FORBIDDEN_PAGE = 'https://main--adaptto--zagi25.aem.live/forbidden';
 
 function getCookieValue(cookieString, cookieName) {
 	if (!cookieString) {
@@ -17,15 +17,19 @@ function getCookieValue(cookieString, cookieName) {
 	}
 }
 
-function createNewResponse(response, isCacheable, mustRevalidate, resetCookies, httpStatus) {
+function createNewResponse(response, isCacheable, mustRevalidate, resetCookies, userName, httpStatus) {
 	const newHeaders = new Headers(response.headers);
 	if(!isCacheable) {
 		newHeaders.set('Cache-Control', 'no-store');
-		newHeaders.set('Pragma', 'no-cache');
-		newHeaders.set('Expires', '0');
 	} else {
-		const cacheControl = mustRevalidate ? 'must-revalidate, private, max-age=0' : 'public, max-age=500';
+		const protection = response.headers.get('protection');
+		const cacheControl = mustRevalidate && protection ? 'must-revalidate, private, max-age=0' : 'public, max-age=500';
 		newHeaders.set('Cache-Control', cacheControl);
+		if (userName) {
+			newHeaders.set("X-Auth-User", userName);
+			newHeaders.set("X-Auth-State", "loggedin");
+		}
+		newHeaders.set("Vary", "X-Auth-User, Accept-Encoding");
 	}
 	if (resetCookies) {
 		console.log('resetting cookies');
@@ -42,16 +46,16 @@ function createNewResponse(response, isCacheable, mustRevalidate, resetCookies, 
 
 async function redirectToLogin(request) {
 	console.log(`requesting login page`);
-	const loginReq = new Request(new URL(`https://14257-partnerportaltest-adapttodemo.dev.runtime.adobe.io/index.html`), request);
-	const loginOpts = {cf: {}};
-	loginReq.headers.set('x-forwarded-host', loginReq.headers.get('host'));
-	loginReq.headers.set('x-byo-cdn-type', 'cloudflare');
-	const loginResp = (await fetch(loginReq, loginOpts)).clone();
-	console.log(`retrieved login page`);
-	return createNewResponse(loginResp, false, false);
+  const loginReq = new Request(new URL('https://14257-partnerportaltest-adapttodemo.adobeio-static.net/index.html'), request);
+  const loginOpts = { cf: {} };
+  loginReq.headers.set("x-forwarded-host", loginReq.headers.get("host"));
+  loginReq.headers.set("x-byo-cdn-type", "cloudflare");
+  const loginResp = (await fetch(loginReq, loginOpts)).clone();
+  console.log(`retrieved login page`);
+  return createNewResponse(loginResp, false, false);
 }
 
-async function redirectToForbidden(request) {
+async function redirectToForbidden(request, resetCookies = false) {
 	console.log(`requesting forbidden page`);
 	const forbiddenReq = new Request(new URL(FORBIDDEN_PAGE), request);
 	const forbiddenOpts = {cf: {}};
@@ -59,7 +63,7 @@ async function redirectToForbidden(request) {
 	forbiddenReq.headers.set('x-byo-cdn-type', 'cloudflare');
 	const forbiddenResp = await fetch(forbiddenReq, forbiddenOpts);
 	console.log(`retrieved forbidden page`);
-	return createNewResponse(forbiddenResp, true, true, false, 403);
+	return createNewResponse(forbiddenResp, true, true, resetCookies, 403);
 }
 
 function getBackendUrl(request) {
@@ -83,7 +87,9 @@ async function fetchFromOrigin(request, url) {
 	const opts = {cf: {}};
 	req.headers.set('x-forwarded-host', req.headers.get('host'));
 	req.headers.set('x-byo-cdn-type', 'cloudflare');
-
+	req.headers.set('cache-control', 'no-cache');
+  req.headers.set('pragma', 'no-cache');
+  req.headers.delete('if-modified-since');
 
 	return await fetch(req, opts);
 }
@@ -111,6 +117,27 @@ function hasUserAccess(memberData, protection) {
 	return memberData.level === 'secret' || protection === memberData.level || !protection || protection === 'public';
 }
 
+async function shouldRedirectToLogin(request, adaptToVerification, memberDataJson) {
+	const shouldLogin = true;
+	let loginRedirect;
+	const requestUrl = new URL(request.url);
+	if (!requestUrl.pathname.startsWith('/sign-in')) {
+		return {};
+	}
+
+	if (adaptToVerification && memberDataJson) {
+		loginRedirect = new Response('', {
+			status: 302,
+			headers: {
+				'Location': 'https://www.apollopoll.com'
+			}
+		});
+	} else {
+		loginRedirect = redirectToLogin(request);
+	}
+	return { shouldLogin, loginRedirect };
+}
+
 export default {
 	async fetch(request, env, ctx) {
 		try {
@@ -120,50 +147,58 @@ export default {
 			const cacheKey = request.url;
 			let backendUrl = getBackendUrl(request);
 			console.log(`backendUrl is ${backendUrl?.hostname}`);
-			let resp =  backendUrl?.hostname === ORIGIN_HOSTNAME ?await cache.match(cacheKey): null;
+			const memberDataJson = getCookieValue(request.headers.get("Cookie"), "adaptToMemberData");
+			const adaptToVerification = getCookieValue(request.headers.get("Cookie"), "adaptToVerification");
+			const { shouldLogin, loginRedirect } = await shouldRedirectToLogin(request, adaptToVerification, memberDataJson);
+			if (shouldLogin) {
+				return await loginRedirect;
+			}
+
+			let resp = backendUrl?.hostname === ORIGIN_HOSTNAME ? await cache.match(cacheKey) : null;
 			console.log(`${request.url} retrieved from cache`, resp);
 			if (!resp) {
-				// response not retrieved from cache, so we need to invoke the origin
 				resp = await fetchFromOrigin(request, backendUrl);
-				console.log(`${cacheKey} retrieved from from origin`, resp);
+				console.log(`${cacheKey} retrieved from from origin`, resp.status);
 				ctx.waitUntil(cache.put(cacheKey, resp.clone()));
 				console.log(`${cacheKey} added to cache`);
 			}
+
 			resp = new Response(resp.body, resp);
-			resp.headers.delete('age');
-			resp.headers.delete('x-robots-tag');
-
+			resp.headers.delete("age");
+			resp.headers.delete("x-robots-tag");
 			const protection = resp.headers.get("protection");
-			console.log(`response status ${resp.status}, protection: ${protection}`, new Date());
-			const memberDataJson = getCookieValue(request.headers.get('Cookie'), 'adaptToMemberData');
-			const adaptToVerification = getCookieValue(request.headers.get('Cookie'), 'adaptToVerification');
-
+			console.log(`response status ${resp.status}, protection: ${protection}`, /* @__PURE__ */ new Date());
+			if (resp.status === 404) {
+				return await redirectToForbidden(request);
+			}
 			let memberData = {};
-			if(memberDataJson && adaptToVerification) {
+			if (memberDataJson && adaptToVerification) {
 				memberData = JSON.parse(memberDataJson);
 			} else if (memberDataJson || adaptToVerification) {
 				resetCookies = true;
 			}
-
-
 			if (shouldValidate(protection, memberDataJson, adaptToVerification, backendUrl)) {
 				try {
-					console.log(`existing membership level is ${memberData.level} with verification ${adaptToVerification}`, new Date());
+					console.log(`existing membership level is ${memberData.level} with verification ${adaptToVerification}`, /* @__PURE__ */ new Date());
 					if (isProtectedResource(protection) && !memberData.level) {
-						// send the user to the login page
-						return await redirectToLogin(request);
+						//return await redirectToLogin(request);
+						return new Response('', {
+							status: 302,
+							headers: {
+								'Location': `https://www.apollopoll.com/sign-in?redirect=${request.url}`
+							}
+						});
 					}
-					// user already signed in, we need to verify his access
 					const verifyUserResponse = await fetch("https://14257-partnerportaltest-adapttodemo.adobeioruntime.net/api/v1/web/AdapttoService/verifyUser", {
 						method: "POST",
 						body: JSON.stringify({
 							verification: adaptToVerification,
-							userData: memberData,
+							userData: memberData
 						}),
 						headers: {
 							"Content-type": "application/json; charset=UTF-8"
 						}
-					})
+					});
 					console.log(`verify user response status ${verifyUserResponse.status}`);
 					if (verifyUserResponse.status !== 200) {
 						memberData = {};
@@ -173,20 +208,16 @@ export default {
 					console.log(`error parsing member data ${memberDataJson}`);
 					resetCookies = true;
 				}
-				// all good: we can serve the response to the user
 			}
-
 			if (!hasUserAccess(memberData, protection)) {
-				//the user does not have access to the requested resource
-				return await redirectToForbidden(request);
+				return await redirectToForbidden(request, resetCookies);
 			}
 			console.log(`returning response with status ${resp.status}`);
-			// we can cache the response
-			resp = createNewResponse(resp, true, true, resetCookies);
+			const isCacheable = !protection || protection === 'public';
+			resp = createNewResponse(resp, isCacheable, true, resetCookies, memberData.userName);
 			return resp;
 		} catch (e) {
 			return new Response(e.stack, {status: 500})
 		}
 	}
 }
-
